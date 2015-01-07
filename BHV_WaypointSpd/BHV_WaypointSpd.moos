@@ -1,0 +1,30 @@
+// Example usage
+Behavior = BHV_WaypointSpd
+{
+  name      = bhv_waypt_spd
+  pwt       = 100
+  condition = RETURN = false
+  condition = (DEPLOY = true)
+  updates = WAYPOINT_UPDATE
+  endflag   = WAYPOINTS_DONE = true
+
+  // SK: added spd control
+  // spd_radius: outer radius wherein speed is linearly decreased,
+  //             a reasonably default may be: 2*slip_radius
+  spd_radius = 30     // m
+  // max speed: outside 'spd_radius'
+  max_speed = 2.0     // m/s
+  // min speed: inside 'capture_radius'
+  min_speed = 0.5     // m/s
+
+  capture_radius = 5.0  // m
+  slip_radius = 15.0    // m
+  lead = 15             // m
+
+  points = -155,-65:76,-65:76,-90:-155,-90
+  repeat = 100 // # times to repeat waypoints list
+
+  visual_hints = nextpt_color=red, nextpt_lcolor=green
+  visual_hints = vertex_color=yellow, edge_color=gray25
+  visual_hints = vertex_size=1, edge_size=1
+}
