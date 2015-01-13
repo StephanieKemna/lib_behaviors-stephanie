@@ -702,7 +702,6 @@ IvPFunction *BHV_WaypointSpd::buildOF(string method)
       double spd_diff = m_max_cruise_speed - m_min_cruise_speed;
       double range = m_dist_to_next_wpt - m_capture_radius;
       cruise_speed = m_min_cruise_speed + (range/spd_range)*spd_diff;
-      std::cout << "setting speed to: " << cruise_speed << std::endl;
     }
     else // must be smaller than capture radius, use min speed
       cruise_speed = m_min_cruise_speed;
