@@ -13,6 +13,8 @@
 /*    FILE: BHV_Waypoint.h                                       */
 /*    DATE: Nov 2004 (original version - many changes since)     */
 /*                                                               */
+/* This file is part of MOOS-IvP                                 */
+/*                                                               */
 /* MOOS-IvP is free software: you can redistribute it and/or     */
 /* modify it under the terms of the GNU General Public License   */
 /* as published by the Free Software Foundation, either version  */
@@ -71,6 +73,8 @@ protected:
 protected: // configuration parameters
   double      m_min_cruise_speed;
   double      m_max_cruise_speed;
+  double      m_commanded_speed;
+  
   bool        m_lead_to_start;
   double      m_lead_distance;
   double      m_lead_damper;
@@ -92,6 +96,7 @@ protected: // configuration parameters
   // Visual hints affecting properties of polygons/points
   std::string m_hint_vertex_color;
   std::string m_hint_edge_color;
+  std::string m_hint_label_color;
   std::string m_hint_nextpt_color;
   std::string m_hint_nextpt_lcolor;
   double      m_hint_vertex_size;
@@ -104,14 +109,24 @@ protected: // intermediate or object global variables.
   double    m_osx;  // Ownship x position
   double    m_osy;  // Ownship y position
   
-  // Odometry state information
+  // Time/Distance efficiency state information
   bool      m_odo_set_flag;
+  bool      m_odo_leg_disq;
+  double    m_odo_settime;
   double    m_odo_setx;
   double    m_odo_sety;
-  double    m_odo_distance;
   bool      m_odo_virgin;
+
+  double    m_dist_leg_odo;
+
   double    m_dist_total_odo;
   double    m_dist_total_linear;
+  double    m_time_total_odo;
+  double    m_time_total_linear;
+
+  double    m_course_pct;
+  double    m_speed_pct;
+
   // SK store distance to next wpt
   double    m_dist_to_next_wpt;
 

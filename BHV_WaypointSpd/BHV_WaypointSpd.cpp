@@ -11,7 +11,9 @@
 /*    NAME: Michael Benjamin, Henrik Schmidt, and John Leonard   */
 /*    ORGN: Dept of Mechanical Eng / CSAIL, MIT Cambridge MA     */
 /*    FILE: BHV_Waypoint.cpp                                     */
-/*    DATE: Nov 2004 (original version - many changes since)     */
+/*    DATE: Nov 2004                                             */
+/*                                                               */
+/* This file is part of MOOS-IvP                                 */
 /*                                                               */
 /* MOOS-IvP is free software: you can redistribute it and/or     */
 /* modify it under the terms of the GNU General Public License   */
@@ -71,7 +73,7 @@ BHV_WaypointSpd::BHV_WaypointSpd(IvPDomain gdomain) :
   m_max_cruise_speed    = 0;  // meters/second
   m_lead_distance   = -1; // meters - default of -1 means unused
   m_lead_damper     = -1; // meters - default of -1 means unused
-  m_efficiency_measure = "off"; // or "internal" or "all"
+  m_efficiency_measure = "off"; // or "off" or "all"
   m_ipf_type        = "zaic";
 
   m_var_report      = "WPT_STAT";
@@ -82,6 +84,8 @@ BHV_WaypointSpd::BHV_WaypointSpd(IvPDomain gdomain) :
   // SK: speed control, initialize all variables
   m_min_cruise_speed = 0;
   m_max_cruise_speed = 0;
+  m_commanded_speed = 0;
+  
   m_capture_radius = 0;
   m_slip_radius = 0;
   m_spd_radius = 0;
@@ -92,6 +96,7 @@ BHV_WaypointSpd::BHV_WaypointSpd(IvPDomain gdomain) :
   m_hint_edge_size     = 1;
   m_hint_vertex_color  = "dodger_blue";
   m_hint_edge_color    = "white";
+  m_hint_label_color   = "white";
   m_hint_nextpt_color  = "yellow";
   m_hint_nextpt_lcolor = "aqua";
   m_hint_nextpt_vertex_size = 5;
@@ -103,6 +108,9 @@ BHV_WaypointSpd::BHV_WaypointSpd(IvPDomain gdomain) :
   m_completed  = false; 
   m_perpetual  = false;
 
+  m_course_pct = 50;
+  m_speed_pct  = 50;
+
   m_osx   = 0;
   m_osy   = 0;
   m_osv   = 0;
@@ -111,10 +119,13 @@ BHV_WaypointSpd::BHV_WaypointSpd(IvPDomain gdomain) :
   m_odo_set_flag = false;
   m_odo_setx = 0;
   m_odo_sety = 0;
-  m_odo_distance = 0;
-  m_odo_virgin   = true;
+  m_odo_virgin = true;
+
+  m_dist_leg_odo = 0;
   m_dist_total_odo    = 0;
   m_dist_total_linear = 0;
+  m_time_total_odo    = 0;
+  m_time_total_linear = 0;
 
   m_osx_prev = 0;
   m_osy_prev = 0;
@@ -179,10 +190,14 @@ bool BHV_WaypointSpd::setParam(string param, string param_val)
     return(true);
   }
   else if((param == "min_speed") && (dval > 0)) {
+    if(dval != m_min_cruise_speed)
+      m_odo_leg_disq = true;
     m_min_cruise_speed = dval;
     return(true);
   }
   else if((param == "max_speed") && (dval > 0)) {
+    if(dval != m_max_cruise_speed)
+      m_odo_leg_disq = true;
     m_max_cruise_speed = dval;
     return(true);
   }
@@ -233,7 +248,7 @@ bool BHV_WaypointSpd::setParam(string param, string param_val)
       return(false);
     m_var_cyindex = param_val;
     if(tolower(m_var_cyindex)=="silent")
-      m_var_index = "silent";
+      m_var_cyindex = "silent";
     return(true);
   }
   else if(param == "post_suffix") {
@@ -301,7 +316,7 @@ bool BHV_WaypointSpd::setParam(string param, string param_val)
   }
   else if(param == "efficiency_measure") {
     param_val = tolower(param_val);
-    if((param_val == "all") || (param_val == "internal") || (param_val == "off")) {
+    if((param_val == "all") || (param_val == "off")) {
       m_efficiency_measure = param_val;
       return(true);
     }
@@ -357,6 +372,16 @@ bool BHV_WaypointSpd::setParam(string param, string param_val)
       m_waypoint_engine.setCaptureLine(false);
     return(true);
   }
+  else if(param == "crs_spd_zaic_ratio") {
+    // require dval such that course and speed pcts are each in [1,99]
+    // and sum to 100.
+    if((dval < 1) || (dval > 99))
+      return(false);
+    m_course_pct = dval;
+    m_speed_pct = 100-dval;
+    return(true);
+  }
+
   else if(param == "visual_hints")  {
     vector<string> svector = parseStringQ(param_val, ',');
     unsigned int i, vsize = svector.size();
@@ -375,8 +400,11 @@ void BHV_WaypointSpd::onIdleToRunState()
 {
   if(!updateInfoIn()) 
     return;
-  if(m_efficiency_measure == "all")
-    markOdoLeg();
+  m_odo_leg_disq = true;
+  
+  // Set to true so odometry picks up from where it is now, not from
+  // where it was when the behavior became idle
+  m_odo_virgin = true;
 }
 
 //-----------------------------------------------------------
@@ -389,7 +417,7 @@ void BHV_WaypointSpd::onRunToIdleState()
   postErasables();
   m_waypoint_engine.resetCPA();
   m_odo_set_flag = false;
-  m_odo_distance = 0;
+  m_odo_leg_disq = true;
 
   // If we were publishing distances to prev or next waypoint, publish
   // one final time, values that indicate that we're not progressing on pts
@@ -483,7 +511,7 @@ IvPFunction *BHV_WaypointSpd::onRunState()
   // SK: refactoring to store distance to next wpt, to be used for speed ipf
   m_dist_to_next_wpt = m_waypoint_engine.distToNextWpt(m_osx, m_osy);
   if(m_var_dist_to_next != "")
-    postMessage(m_var_dist_to_next, m_dist_to_next_wpt);
+    postMessage(m_var_dist_to_next, m_waypoint_engine.distToNextWpt(m_osx, m_osy));
 
   IvPFunction *ipf = buildOF(m_ipf_type);
   if(ipf)
@@ -566,7 +594,7 @@ bool BHV_WaypointSpd::setNextWaypoint()
   if(feedback_msg != "in-transit")
     markOdoLeg();
 
-  postMessage("WAYPOINT_ODO", m_odo_distance);
+  postMessage("WPT_ODO" + m_var_suffix, m_dist_leg_odo);
 
   if((feedback_msg=="completed") || (feedback_msg=="cycled")) {
     if(tolower(m_var_report) != "silent") {
@@ -665,7 +693,7 @@ IvPFunction *BHV_WaypointSpd::buildOF(string method)
     // method not used atm
     bool ok = true;
     AOF_Waypoint aof_wpt(m_domain);
-    // TODO: change speed given range? -> roc method is not used atm
+    // TODO: change speed given range? - method not used atm
     double cruise_speed = m_max_cruise_speed - m_min_cruise_speed;
     ok = ok && aof_wpt.setParam("desired_speed", cruise_speed);
     ok = ok && aof_wpt.setParam("osx", m_osx);
@@ -708,6 +736,7 @@ IvPFunction *BHV_WaypointSpd::buildOF(string method)
 
     double peak_width = cruise_speed / 2;
     spd_zaic.setParams(cruise_speed, peak_width, 1.6, 20, 0, 100);
+    m_commanded_speed = cruise_speed;
     //    spd_zaic.setParams(m_cruise_speed, 1, 1.6, 20, 0, 100);
     IvPFunction *spd_ipf = spd_zaic.extractIvPFunction();
     if(!spd_ipf)
@@ -729,7 +758,7 @@ IvPFunction *BHV_WaypointSpd::buildOF(string method)
       postWMessage("Failure on the CRS ZAIC");
 
     OF_Coupler coupler;
-    ipf = coupler.couple(crs_ipf, spd_ipf, 50, 50);
+    ipf = coupler.couple(crs_ipf, spd_ipf, m_course_pct, m_speed_pct);
     if(!ipf)
       postWMessage("Failure on the CRS_SPD COUPLER");
   }    
@@ -782,6 +811,8 @@ void BHV_WaypointSpd::postViewableSegList()
     seglist.set_color("vertex", m_hint_vertex_color);
   if(m_hint_edge_color != "")
     seglist.set_color("edge", m_hint_edge_color);
+  if(m_hint_label_color != "")
+    seglist.set_color("label", m_hint_label_color);
   if(m_hint_edge_size >= 0)
     seglist.set_edge_size(m_hint_edge_size);
   if(m_hint_vertex_size >= 0)
@@ -878,6 +909,8 @@ void BHV_WaypointSpd::handleVisualHint(string hint)
     m_hint_vertex_color = value;
   else if((param == "edge_color") && isColor(value))
     m_hint_edge_color = value;
+  else if((param == "label_color") && isColor(value))
+    m_hint_label_color = value;
   else if((param == "nextpt_color") && isColor(value)) 
     m_hint_nextpt_color = value;
   else if((param == "nextpt_lcolor") && isColor(value)) 
@@ -895,7 +928,7 @@ void BHV_WaypointSpd::updateOdoDistance()
 {
   if(!m_odo_virgin) {
     double delta = distPointToPoint(m_osx, m_osy, m_osx_prev, m_osy_prev);
-    m_odo_distance += delta;
+    m_dist_leg_odo += delta;
   }
   else
     m_odo_virgin = false;
@@ -917,54 +950,89 @@ void BHV_WaypointSpd::markOdoLeg()
   if(m_efficiency_measure == "off")
     return;
   // First time through just mark the set point and return
-  if(!m_odo_set_flag) {
+  if(!m_odo_set_flag || m_odo_leg_disq) {
     m_odo_setx = m_osx;
     m_odo_sety = m_osy;
-    m_odo_distance = 0;
+    m_odo_settime = getBufferCurrTime();
     m_odo_set_flag = true;
+    m_dist_leg_odo = 0;
+    m_odo_leg_disq = false;
     return;
   }
 
-  // Part 1: Note the straight line linear distance between the previously
-  //         noted set point, and our present position
-  double dist_linear = distPointToPoint(m_osx, m_osy, m_odo_setx, m_odo_sety);
-  m_dist_total_linear += dist_linear;
+  // Part 1A: Note the straight line linear distance between the previously
+  //          noted set point, and our present position
+  double dist_leg_linear = distPointToPoint(m_osx, m_osy, m_odo_setx, m_odo_sety);
+  m_dist_total_linear += dist_leg_linear;
 
-  // Part 2: Note the actual odometry distance travelled
-  double dist_odo = m_odo_distance;
-  m_dist_total_odo += dist_odo;
+  // Part 1B: Note the time since the previous noted set point
+  double time_leg_linear = 0;
+  if (m_commanded_speed > 0) {
+    time_leg_linear = dist_leg_linear / m_commanded_speed;
+    m_time_total_linear += time_leg_linear;
+  }
 
-  // Part 3: Calculate the Leg Efficiency
-  double leg_efficiency = 0;
-  if(dist_odo > 0)
-    leg_efficiency = dist_linear / dist_odo;
+  // Part 2A: Note the actual odometry distance travelled
+  double dist_leg_odo = m_dist_leg_odo;
+  m_dist_total_odo += dist_leg_odo;
 
-  // Part 5: Calculate the running total Efficiency
-  double total_efficiency = 0;
+  // Part 2B: Note the actual time travelled
+  double time_leg_odo = getBufferCurrTime() - m_odo_settime;
+  m_time_total_odo += time_leg_odo;
+
+
+  // Part 3A: Calculate the Leg Odo Efficiency
+  double leg_odo_efficiency = 0;
+  if(dist_leg_odo > 0)
+    leg_odo_efficiency = dist_leg_linear / dist_leg_odo;
+
+  // Part 3B: Calculate the Leg Time Efficiency
+  double leg_time_efficiency = 0;
+  if(time_leg_odo > 0)
+    leg_time_efficiency = time_leg_linear / time_leg_odo;
+
+  // Part 4A: Calculate the  Total Odo Efficiency
+  double total_dist_efficiency = 0;
   if(m_dist_total_odo > 0)
-    total_efficiency = m_dist_total_linear / m_dist_total_odo;
+    total_dist_efficiency = m_dist_total_linear / m_dist_total_odo;
+
+  // Part 4B: Calculate the Total Time Efficiency
+  double total_time_efficiency = 0;
+  if(m_time_total_odo > 0)
+    total_time_efficiency = m_time_total_linear / m_time_total_odo;
 
   // Part 6: Build the leg output message:  WPT_EFFICIENCY_LEG
   string str = "vname=" + m_us_name;
   str += ", bhv_name=" + m_descriptor;
-  str += ", linear_dist=" + doubleToStringX(dist_linear, 1);
-  str += ", odo_dist=" +  doubleToStringX(dist_odo,1);
-  str += ", efficiency=" +  doubleToStringX(leg_efficiency, 3);
-  postMessage("WPT_EFFICIENCY_LEG", str);
+  str += ", linear_dist=" + doubleToStringX(dist_leg_linear, 1);
+  str += ", odo_dist=" +  doubleToStringX(dist_leg_odo,1);
+  str += ", efficiency_dist=" +  doubleToStringX(leg_odo_efficiency, 3);
+  str += ", linear_time=" + doubleToStringX(time_leg_linear, 1);
+  str += ", odo_time=" +  doubleToStringX(time_leg_odo,1);
+  str += ", efficiency_time=" +  doubleToStringX(leg_time_efficiency, 3);
+  postMessage("WPT_EFF_SUMM_LEG"+m_var_suffix, str);
 
   // Part 7: Build the total efficiency message: WPT_EFFICIENCY_SUM
   str = "vname=" + m_us_name;
   str += ", bhv_name=" + m_descriptor;
   str += ", linear_dist=" + doubleToStringX(m_dist_total_linear,1);
   str += ", odo_dist=" +  doubleToStringX(m_dist_total_odo,1);
-  str += ", efficiency=" +  doubleToStringX(total_efficiency,3);
-  postMessage("WPT_EFFICIENCY_SUM", str);
+  str += ", efficiency_dist=" +  doubleToStringX(total_dist_efficiency,3);
+  str += ", linear_time=" + doubleToStringX(m_time_total_linear,1);
+  str += ", odo_time=" +  doubleToStringX(m_time_total_odo,1);
+  str += ", efficiency_time=" +  doubleToStringX(total_time_efficiency,3);
+  postMessage("WPT_EFF_SUMM_ALL"+m_var_suffix, str);
 
-  // Part 8: Post the simple total efficiency message: WPT_EFFICIENCY_VAL
-  postMessage("WPT_EFFICIENCY_VAL", total_efficiency);
+  // Part 8: Post the simple total efficiency message: WPT_EFFICIENCY_DIST_VAL
+  postMessage("WPT_EFF_DIST_ALL"+m_var_suffix, total_dist_efficiency);
+  postMessage("WPT_EFF_TIME_ALL"+m_var_suffix, total_time_efficiency);
+  postMessage("WPT_EFF_DIST_LEG"+m_var_suffix, leg_odo_efficiency);
+  postMessage("WPT_EFF_TIME_LEG"+m_var_suffix, leg_time_efficiency);
 
   // Part 9: Reset the set point the present position
   m_odo_setx = m_osx;
   m_odo_sety = m_osy;
-  m_odo_distance = 0;
+  m_odo_settime = getBufferCurrTime();
+
+  m_dist_leg_odo = 0;
 }
